@@ -18,6 +18,7 @@ from typing import Union, Optional
 from numbers import Number
 import numpy as np
 import scipy.optimize as sciop
+from scipy.integrate import quad
 
 
 class L2Norm(LpNorm):
@@ -988,3 +989,218 @@ class QuadraticForm(DifferentiableFunctional):
             return 2 * x
         else:
             return 2 * self.linop * x
+
+
+
+class SCADFunctional(ProximableFunctional):
+    r"""
+    :math:`gamma * int_0^x[min(1, (a - t/gamma)_+/(a-1))] dt`.
+
+    Examples
+    --------
+
+    .. testsetup::
+
+       import numpy as np
+       from pycsou.func.penalty import SCADFunctional
+
+    .. doctest::
+
+       >>> x = np.arange(-9, 10, dtype=float)
+       >>> gamma = 0.5
+       >>> norm = SCADFunctional(dim=x.size, gamma = gamma)
+       >>> norm(x)
+       10.89490740816857
+       >>> norm.prox(x, gamma)
+       array([ -9. ,  -8. ,  -7. ,  -6. ,  -5. ,  -4. ,  -3. ,  -2. ,
+        -0.5,   0. ,   0.5,   2. ,   3. ,   4. ,   5. ,   6. ,   7. ,
+         8. ,   9. ])
+
+
+    Notes
+    -----
+    The Smoothly Clipped Absolute Deviation (SCAD) penalty is convex and proximable. This penalty tends to produce non
+    unique and sparse solutions. The proximal operator of the SCAD penalty function is provided in [SCAD].
+
+    [SCAD] Jianqing Fan & Runze Li "Variable selection via nonconcave penalized likelihood and its oracle properties." J Amer Statistical Assoc, 96 (456) (2001), pp. 1348-1360
+
+
+    See Also
+    --------
+    :py:func:`~pycsou.func.penalty.L1Norm`, :py:class:`~pycsou.func.penalty.MCPFunctional`.
+    """
+
+    def __init__(self, dim: int, gamma: float, a: float = 3.7):
+
+        r"""
+        Parameters
+        ----------
+        dim : int
+            Dimension of the domain.
+        gamma: float
+            Scaling of the SCAD function, regularization parameter.
+        a: float, optional
+            Parametrizes the SCAD penalty function.
+        """
+        assert a > 2
+        self.a = a
+        self.gamma = gamma
+        self.maxValues = {}
+
+        super(SCADFunctional, self).__init__(dim=dim, data=None, is_differentiable=False, is_linear=False)
+
+    def __call__(self, x: Union[Number, np.ndarray]) -> Number:
+
+        def f(t):
+            return self.gamma * min(1, max(self.a - t / self.gamma, 0) / (self.a - 1))
+
+        obj = 0
+
+        for x_i in list(x):
+            if x_i >= self.a * self.gamma:
+                obj += self.get_max_value()
+            else:
+                obj += np.sum(quad(f, 0, abs(x_i))[0])
+
+        return obj
+
+
+
+    def prox(self, x: Union[Number, np.ndarray], tau: Number) -> Union[Number, np.ndarray]:
+        r"""
+        Proximal operator, see :py:class:`pycsou.core.functional.ProximableFunctional` for a detailed description.
+        """
+        result = x.copy()
+        result[abs(x) <= 2 * tau, None] = self.soft(x[abs(x) <= 2 * tau, None], tau)
+        result[(abs(x) < self.a * tau) * (abs(x) > 2 * tau), None] = \
+            self.soft(x[(abs(x) < self.a * tau) * (abs(x) > 2 * tau), None],
+                      self.a * tau / (self.a - 1)) / (1 - 1 / (self.a - 1))
+        return result
+
+    def get_max_value(self):
+        """Computes the largest possible penalty value for the SCAD penalty.
+        Parameters
+        ----------
+        gamma : float
+            The regularization parameter.
+        Returns
+        -------
+        max_value : float
+            The maximum value possible for the SCAD penalty.
+
+        """
+
+        if (self.a, self.gamma) not in self.maxValues:
+            def f(t): return self.gamma * min(1, max(self.a - t / self.gamma, 0) / (self.a - 1))
+
+            self.maxValues[(self.a, self.gamma)] = quad(f, 0, abs(self.a * self.gamma))[0]
+
+        return self.maxValues[(self.a, self.gamma)]
+
+    def soft(self, x: Union[Number, np.ndarray], tau: Number) -> Union[Number, np.ndarray]:
+        r"""Soft thresholding operator (see :py:func:`~pycsou.math.prox.soft` for a definition)."""
+        return soft(x=x, tau=tau)
+
+
+
+
+class MCPFuncional(ProximableFunctional):
+    r"""
+    :math:`gamma * int_0^x[(1- t/(a*gamma))_+] dt`.
+
+    Examples
+    --------
+
+    .. testsetup::
+
+       import numpy as np
+       from pycsou.func.penalty import MCPFuncional
+
+    .. doctest::
+
+       >>> x = np.arange(-9, 10, dtype=float)
+       >>> gamma = 0.5
+       >>> norm = MCPFuncional(dim=x.size, gamma = gamma)
+       >>> norm(x)
+       10.89490740816857
+       >>> norm.prox(x, gamma)
+       array([ -9. ,  -8. ,  -7. ,  -6. ,  -5. ,  -4. ,  -3. ,  -2. ,
+        -0.5,   0. ,   0.5,   2. ,   3. ,   4. ,   5. ,   6. ,   7. ,
+         8. ,   9. ])
+
+
+    Notes
+    -----
+    The Minimax Concave Penalty (MCP) penalty is convex and proximable. This penalty tends to produce non
+    unique and sparse solutions. The proximal operator of the MCP function is provided in [MCP].
+
+    [MCP] Cun-Hui Zhang "Nearly unbiased variable selection under minimax concave penalty." Ann. Stat., 38 (2) (2010), pp. 894-942
+
+
+    See Also
+    --------
+    :py:func:`~pycsou.func.penalty.L1Norm`, :py:class:`~pycsou.func.penalty.SCADFunctional`.
+    """
+
+    def __init__(self, dim: int, gamma: float, a: float = 3.7):
+
+        r"""
+        Parameters
+        ----------
+        dim : int
+            Dimension of the domain.
+        gamma: float
+            Scaling of the MCP function, regularization parameter.
+        a: float, optional
+            Parametrizes the MCP function.
+        """
+        assert a > 1
+        self.a = a
+        self.gamma = gamma
+        self.maxValues = {}
+
+        super(MCPFuncional, self).__init__(dim=dim, data=None, is_differentiable=False, is_linear=False)
+
+    def __call__(self, x: Union[Number, np.ndarray]) -> Number:
+
+        def f(t):
+            return self.gamma * max(0, 1 - t / (self.a * self.gamma))
+
+        return np.sum(np.asarray([self.get_max_value()
+                                  if (elem >= self.a * self.gamma)
+                                  else np.sum(quad(f, 0, abs(elem))[0])
+                                  for elem in x]).reshape(-1, 1))
+
+    def prox(self, x: Union[Number, np.ndarray], tau: Number) -> Union[Number, np.ndarray]:
+        r"""
+        Proximal operator, see :py:class:`pycsou.core.functional.ProximableFunctional` for a detailed description.
+        """
+        result = x.copy()
+
+        result[abs(x) <= self.a * tau, None] = self.a / (self.a - 1) * self.soft(x[abs(x) <= self.a * tau, None], tau)
+
+        return result
+
+    def get_max_value(self):
+        """Computes the largest possible penalty value for the MCP penalty.
+        Parameters
+        ----------
+        gamma : float
+            The regularization parameter.
+        Returns
+        -------
+        max_value : float
+            The maximum value possible for the SCAD penalty.
+
+        """
+
+        if (self.a, self.gamma) not in self.maxValues:
+            def f(t): return self.gamma * max(0, 1 - t / (self.a * self.gamma))
+
+            self.maxValues[(self.a, self.gamma)] = quad(f, 0, abs(self.a * self.gamma))[0]
+
+        return self.maxValues[(self.a, self.gamma)]
+
+    def soft(self, x: Union[Number, np.ndarray], tau: Number) -> Union[Number, np.ndarray]:
+        r"""Soft thresholding operator (see :py:func:`~pycsou.math.prox.soft` for a definition)."""
+        return soft(x=x, tau=tau)
